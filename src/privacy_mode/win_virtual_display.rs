@@ -16,11 +16,13 @@ use winapi::{
     um::{
         wingdi::{
             DEVMODEW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ACTIVE, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
-            DISPLAY_DEVICE_MIRRORING_DRIVER, DISPLAY_DEVICE_PRIMARY_DEVICE, DM_POSITION,
+            DISPLAY_DEVICE_MIRRORING_DRIVER, DISPLAY_DEVICE_PRIMARY_DEVICE, DM_PELSHEIGHT,
+            DM_PELSWIDTH, DM_POSITION,
         },
         winuser::{
             ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsExW,
-            EnumDisplaySettingsW, CDS_NORESET, CDS_RESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY,
+            EnumDisplaySettingsW, CDS_NORESET, CDS_RESET, CDS_SET_PRIMARY, CDS_TEST,
+            CDS_UPDATEREGISTRY,
             DISP_CHANGE_FAILED, DISP_CHANGE_SUCCESSFUL, EDD_GET_DEVICE_INTERFACE_NAME,
             ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS,
         },
@@ -171,38 +173,41 @@ impl PrivacyModeImpl {
         }
     }
 
-    fn set_primary_display(&mut self) -> ResultType<String> {
-        // Multiple virtual displays with different origins are tested.
-        let display = &self.virtual_displays[0];
-        let display_name = std::string::String::from_utf16(&display.name)?;
-
-        #[allow(invalid_value)]
-        let mut new_primary_dm: DEVMODEW = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-        new_primary_dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
-        new_primary_dm.dmDriverExtra = 0;
-        unsafe {
-            if FALSE
-                == EnumDisplaySettingsW(
-                    display.name.as_ptr(),
-                    ENUM_CURRENT_SETTINGS,
-                    &mut new_primary_dm,
-                )
-            {
-                bail!(
-                    "Failed EnumDisplaySettingsW, device name: {:?}, error: {}",
-                    std::string::String::from_utf16(&display.name),
-                    Error::last_os_error()
-                );
+    fn primary_resolution(&self) -> ResultType<(DWORD, DWORD)> {
+        if let Some(display) = self.displays.iter().find(|display| display.primary) {
+            let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
+            if unsafe {
+                EnumDisplaySettingsW(display.name.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm)
+            } != FALSE && dm.dmPelsWidth > 0 && dm.dmPelsHeight > 0 {
+                return Ok((dm.dmPelsWidth, dm.dmPelsHeight));
             }
+        }
+        bail!("Cannot read the current physical primary display resolution");
+    }
 
-            // Windows 24H2 requires the virtual display to be set first.
-            // No idea why, maybe the same issue: https://developercommunity.visualstudio.com/t/Windows-11-Enterprise-24H2-using-WinApi/10851936?sort=newest
+    fn prepare_primary_mode(&self, resolution: (DWORD, DWORD)) -> ResultType<DEVMODEW> {
+        let display = &self.virtual_displays[0];
+        let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+        dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
+        dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
+        (dm.dmPelsWidth, dm.dmPelsHeight) = resolution;
+        let rc = unsafe {
+            ChangeDisplaySettingsExW(display.name.as_ptr(), &mut dm, NULL as _, CDS_TEST, NULL)
+        };
+        if rc != DISP_CHANGE_SUCCESSFUL {
+            bail!("Virtual display rejected {}x{} (result {})", resolution.0, resolution.1, rc);
+        }
+        Ok(dm)
+    }
+
+    fn set_primary_display(&mut self, mut new_primary_dm: DEVMODEW) -> ResultType<()> {
+        let display = &self.virtual_displays[0];
+        unsafe {
+            // Windows 24H2 requires the virtual display to be staged first.
             let flags = CDS_UPDATEREGISTRY | CDS_NORESET;
-            let offx = new_primary_dm.u1.s2().dmPosition.x;
-            let offy = new_primary_dm.u1.s2().dmPosition.y;
-            new_primary_dm.u1.s2_mut().dmPosition.x = 0;
-            new_primary_dm.u1.s2_mut().dmPosition.y = 0;
-            new_primary_dm.dmFields |= DM_POSITION;
+            let offx = display.dm.u1.s2().dmPosition.x;
+            let offy = display.dm.u1.s2().dmPosition.y;
             let rc = ChangeDisplaySettingsExW(
                 display.name.as_ptr(),
                 &mut new_primary_dm,
@@ -284,7 +289,7 @@ impl PrivacyModeImpl {
             }
         }
 
-        Ok(display_name)
+        Ok(())
     }
 
     // NOTE: We can't detect if the other virtual displays are physical displays or not.
@@ -321,23 +326,14 @@ impl PrivacyModeImpl {
         Ok(())
     }
 
-    #[inline]
-    fn default_display_modes() -> Vec<MonitorMode> {
-        vec![MonitorMode {
-            width: 1920,
-            height: 1080,
-            sync: 60,
-        }]
-    }
-
     // This function will wait at most 6 seconds for the virtual displays to be ready.
     // It's ok to wait, because:
     // 1. A new thread is created to handle the async privacy mode.
     // 2. The user is usually not in a hurry to turn on the privacy mode.
-    pub fn ensure_virtual_display(&mut self, is_async_mode: bool) -> ResultType<()> {
+    fn ensure_virtual_display(&mut self, is_async_mode: bool, resolution: (DWORD, DWORD)) -> ResultType<()> {
         if self.virtual_displays.is_empty() {
             let displays =
-                virtual_display_manager::plug_in_peer_request(vec![Self::default_display_modes()])?;
+                virtual_display_manager::plug_in_peer_request(vec![vec![MonitorMode { width: resolution.0, height: resolution.1, sync: 60 }]])?;
             if is_async_mode {
                 thread::sleep(Duration::from_secs(1));
             }
@@ -471,28 +467,31 @@ impl PrivacyMode for PrivacyModeImpl {
             bail!(NO_PHYSICAL_DISPLAYS);
         }
 
-        let is_async_mode = self.is_async_privacy_mode();
+        let resolution = self.primary_resolution()?;
+        self.ensure_virtual_display(self.is_async_privacy_mode(), resolution)?;
+        if self.virtual_displays.is_empty() {
+            self.restore_plug_out_monitor();
+            bail!("No virtual displays.");
+        }
+
+        // A failed preflight has staged nothing. Only remove monitors created by this attempt.
+        let primary_mode = match self.prepare_primary_mode(resolution) {
+            Ok(mode) => mode,
+            Err(err) => {
+                if !self.virtual_displays_added.is_empty() {
+                    self.restore_plug_out_monitor();
+                }
+                return Err(err);
+            }
+        };
         let mut guard = TurnOnGuard {
             privacy_mode: self,
             succeeded: false,
         };
-
-        guard.ensure_virtual_display(is_async_mode)?;
-        if guard.virtual_displays.is_empty() {
-            log::debug!("No virtual displays");
-            bail!("No virtual displays.");
-        }
-
         let reg_connectivity_1 = reg_display_settings::read_reg_connectivity()?;
-        let primary_display_name = guard.set_primary_display()?;
+        guard.set_primary_display(primary_mode)?;
         guard.disable_physical_displays()?;
         Self::commit_change_display(CDS_RESET)?;
-        // Explicitly set the resolution(virtual display) to 1920x1080.
-        allow_err!(crate::platform::change_resolution(
-            &primary_display_name,
-            1920,
-            1080
-        ));
         let reg_connectivity_2 = reg_display_settings::read_reg_connectivity()?;
 
         if let Some(reg_recovery) =
