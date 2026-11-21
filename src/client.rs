@@ -106,6 +106,8 @@ pub mod file_trait;
 pub mod helper;
 pub mod io_loop;
 pub mod screenshot;
+#[cfg(all(windows, feature = "flutter"))]
+mod device_preview;
 
 pub const MILLI1: Duration = Duration::from_millis(1);
 pub const SEC30: Duration = Duration::from_secs(30);
@@ -4006,6 +4008,12 @@ pub fn start_video_thread<F, T>(
     let mut video_callback = video_callback;
     let mut last_chroma = None;
     let is_view_camera = session.is_view_camera();
+    #[cfg(all(windows, feature = "flutter"))]
+    let mut preview_path = if display == 0 && session.is_default() {
+        device_preview::endpoint_path(&session.lc.read().unwrap().id)
+    } else {
+        None
+    };
 
     std::thread::spawn(move || {
         #[cfg(windows)]
@@ -4056,6 +4064,9 @@ pub fn start_video_thread<F, T>(
                             let mut pixelbuffer = true;
                             let mut tmp_chroma = None;
                             let format_changed = handler.decoder.format() != format;
+                            #[cfg(all(windows, feature = "flutter"))]
+                            let preview_frame =
+                                preview_path.as_ref().and_then(|_| device_preview::keyframe(&vf));
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
                                     video_callback(
@@ -4064,6 +4075,13 @@ pub fn start_video_thread<F, T>(
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
+
+                                    #[cfg(all(windows, feature = "flutter"))]
+                                    if let Some(frame) = preview_frame {
+                                        if let Some(path) = preview_path.take() {
+                                            device_preview::save_async(path, frame);
+                                        }
+                                    }
 
                                     // chroma
                                     if tmp_chroma.is_some() && last_chroma != tmp_chroma {
