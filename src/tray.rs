@@ -67,9 +67,13 @@ fn make_tray() -> hbb_common::ResultType<()> {
     let hide_stop_service = crate::ui_interface::get_builtin_option(
         keys::OPTION_HIDE_STOP_SERVICE,
     ) == "Y";
-    // The tray icon is only shown when the service is running, so we don't need to check
-    // the `stop-service` option here.
-    let quit_i = if !hide_stop_service {
+    #[cfg(windows)]
+    let standalone = !crate::platform::windows::is_self_service_running();
+    #[cfg(not(windows))]
+    let standalone = false;
+    let quit_i = if standalone {
+        Some(MenuItem::new(translate("Quit".to_owned()), true, None))
+    } else if !hide_stop_service {
         Some(MenuItem::new(translate("Stop service".to_owned()), true, None))
     } else {
         None
@@ -80,8 +84,10 @@ fn make_tray() -> hbb_common::ResultType<()> {
     } else {
         tray_menu.append_items(&[&open_i]).ok();
     }
-    let tooltip = |count: usize| {
-        if count == 0 {
+    let tooltip = move |count: usize| {
+        if standalone && count == 0 {
+            crate::get_app_name()
+        } else if count == 0 {
             format!(
                 "{} {}",
                 crate::get_app_name(),
@@ -190,6 +196,10 @@ fn make_tray() -> hbb_common::ResultType<()> {
         if let Ok(event) = menu_channel.try_recv() {
             if let Some(quit_i) = &quit_i {
                 if event.id == quit_i.id() {
+                    if standalone {
+                        *control_flow = ControlFlow::Exit;
+                        return;
+                    }
                     /* failed in windows, seems no permission to check system process
                     if !crate::check_process("--server", false) {
                         *control_flow = ControlFlow::Exit;
