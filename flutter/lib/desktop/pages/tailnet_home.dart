@@ -285,7 +285,7 @@ class _TailnetHomeState extends State<TailnetHome> {
         translate(device.online ? 'Tailscale online' : 'Tailscale offline'),
         if (device.os.isNotEmpty) device.os,
         device.endpoint
-      ].join('  路  ')),
+      ].join('  |  ')),
       const SizedBox(height: 4),
       Text(translate('RustDesk availability is checked when connecting')),
       const SizedBox(height: 16),
@@ -356,7 +356,7 @@ class _DevicePreviewState extends State<DevicePreview> {
       Text(
           modified == null
               ? translate('No saved preview')
-              : '${translate('Last preview')} 路 ${MaterialLocalizations.of(context).formatShortDate(modified)} '
+              : '${translate('Last preview')} | ${MaterialLocalizations.of(context).formatShortDate(modified)} '
                   '${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(modified))}',
           style: theme.textTheme.bodySmall),
     ]);
