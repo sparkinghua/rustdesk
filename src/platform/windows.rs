@@ -2817,6 +2817,43 @@ fn set_process_rdp_window_title(process_id: DWORD, name: &str) -> io::Result<()>
     Ok(())
 }
 
+pub(crate) fn show_main_window_from_tray() -> bool {
+    use winapi::um::winuser::{IsIconic, ShowWindowAsync, SW_RESTORE, SW_SHOW};
+
+    let class = wide_string(FLUTTER_RUNNER_WIN32_WINDOW_CLASS);
+    let title = wide_string(&crate::get_app_name());
+    unsafe {
+        let window = FindWindowW(class.as_ptr(), title.as_ptr());
+        if window.is_null() {
+            return false;
+        }
+        let cmd = if IsIconic(window) != FALSE { SW_RESTORE } else { SW_SHOW };
+        ShowWindowAsync(window, cmd);
+        SetForegroundWindow(window);
+        true
+    }
+}
+
+pub(crate) fn has_tray_for_installed_window() -> bool {
+    use winapi::um::{errhandlingapi::GetLastError, synchapi::OpenMutexW};
+    if !is_cur_exe_the_installed() {
+        return false;
+    }
+    let name = tray_mutex_name();
+    unsafe {
+        let handle = OpenMutexW(winapi::um::winnt::SYNCHRONIZE, FALSE, name.as_ptr());
+        if handle.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        CloseHandle(handle);
+        true
+    }
+}
+
+fn tray_mutex_name() -> Vec<u16> {
+    wide_string(&format!("Local\\{}_tray", crate::get_app_name()))
+}
+
 /// send message to currently shown window
 pub fn send_message_to_hnwd(
     class_name: &str,
@@ -3321,7 +3358,7 @@ pub fn try_lock_tray_single_instance() -> bool {
     };
     // `Local\` is the per session namespace, so the name is scoped to this
     // session already and cannot be squatted by another user.
-    let name = wide_string(&format!("Local\\{}_tray", crate::get_app_name()));
+    let name = tray_mutex_name();
     unsafe {
         // A successful `CreateMutexW` doesn't clear the last error, clear it to
         // reliably detect `ERROR_ALREADY_EXISTS`.

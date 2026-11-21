@@ -2865,8 +2865,15 @@ bool isRunningInPortableMode() {
   return bool.hasEnvironment(kEnvPortableExecutable);
 }
 
+Timer? _hiddenWindowTrayTimer;
+
+bool _hasWindowsTray() => isWindows &&
+    bind.mainGetCommonSync(key: 'has-tray-for-installed-window') == 'true';
+
 /// Window status callback
 Future<void> onActiveWindowChanged() async {
+  _hiddenWindowTrayTimer?.cancel();
+  _hiddenWindowTrayTimer = null;
   print(
       "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
   if (rustDeskWinManager.getActiveWindows().isEmpty) {
@@ -2883,6 +2890,17 @@ Future<void> onActiveWindowChanged() async {
     } catch (err) {
       debugPrintStack(label: "$err");
     } finally {
+      if (rustDeskWinManager.getActiveWindows().isNotEmpty) return;
+      if (_hasWindowsTray()) {
+        _hiddenWindowTrayTimer = Timer.periodic(
+            const Duration(milliseconds: 750), (timer) {
+          if (!_hasWindowsTray()) {
+            timer.cancel();
+            unawaited(onActiveWindowChanged());
+          }
+        });
+        return;
+      }
       debugPrint("Start closing RustDesk...");
       await windowManager.setPreventClose(false);
       await windowManager.close();

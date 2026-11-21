@@ -377,6 +377,11 @@ class _DesktopTabState extends State<DesktopTab>
   @override
   void onWindowFocus() {
     stateGlobal.isFocused.value = true;
+    if (isWindows &&
+        isMainWindow &&
+        !rustDeskWinManager.getActiveWindows().contains(kMainWindowId)) {
+      unawaited(rustDeskWinManager.registerActiveWindow(kMainWindowId));
+    }
   }
 
   @override

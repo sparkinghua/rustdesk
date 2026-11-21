@@ -2763,7 +2763,12 @@ pub fn main_get_printer_names() -> SyncReturn<String> {
 }
 
 pub fn main_get_common(key: String) -> String {
-    if key == "is-printer-installed" {
+    if key == "has-tray-for-installed-window" {
+        #[cfg(windows)]
+        return crate::platform::windows::has_tray_for_installed_window().to_string();
+        #[cfg(not(windows))]
+        return false.to_string();
+    } else if key == "is-printer-installed" {
         #[cfg(target_os = "windows")]
         {
             return match remote_printer::is_rd_printer_installed(&get_app_name()) {

@@ -118,6 +118,9 @@ fn make_tray() -> hbb_common::ResultType<()> {
         crate::platform::macos::handle_application_should_open_untitled_file();
         #[cfg(target_os = "windows")]
         {
+            if crate::platform::windows::show_main_window_from_tray() {
+                return;
+            }
             // Do not use "start uni link" way, it may not work on some Windows, and pop out error
             // dialog, I found on one user's desktop, but no idea why, Windows is shit.
             // Use `run_me` instead.
