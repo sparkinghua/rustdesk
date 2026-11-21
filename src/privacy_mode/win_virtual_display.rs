@@ -1,6 +1,6 @@
 use super::{PrivacyMode, PrivacyModeState, INVALID_PRIVACY_MODE_CONN_ID, NO_PHYSICAL_DISPLAYS};
 use crate::{platform::windows::reg_display_settings, virtual_display_manager};
-use hbb_common::{allow_err, bail, config::Config, log, ResultType};
+use hbb_common::{allow_err, bail, config::Config, libloading::os::windows::Library, log, ResultType};
 use std::{
     io::Error,
     ops::{Deref, DerefMut},
@@ -10,7 +10,7 @@ use std::{
 use virtual_display::MonitorMode;
 use winapi::{
     shared::{
-        minwindef::{DWORD, FALSE},
+        minwindef::{BOOL, DWORD, FALSE, TRUE},
         ntdef::{NULL, WCHAR},
     },
     um::{
@@ -32,6 +32,62 @@ use winapi::{
 pub(super) const PRIVACY_MODE_IMPL: &str = super::PRIVACY_MODE_IMPL_WIN_VIRTUAL_DISPLAY;
 
 const CONFIG_KEY_REG_RECOVERY: &str = "reg_recovery";
+
+// Keep the logical cursor and normal absolute input. Suppress its host desktop
+// image while Amyuni is active, so the viewer can display a low-latency cursor.
+struct HiddenHostCursor {
+    show: unsafe extern "system" fn(BOOL) -> BOOL,
+    uninitialize: unsafe extern "system" fn() -> BOOL,
+    _library: Library,
+}
+
+impl HiddenHostCursor {
+    fn acquire() -> ResultType<Option<Self>> {
+        use winapi::um::{
+            libloaderapi::LOAD_LIBRARY_SEARCH_SYSTEM32,
+            winuser::{GetCursorInfo, CURSORINFO, CURSOR_SHOWING},
+        };
+        unsafe {
+            let mut info: CURSORINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<CURSORINFO>() as _;
+            if GetCursorInfo(&mut info) == FALSE {
+                return Err(Error::last_os_error().into());
+            }
+            if info.flags & CURSOR_SHOWING == 0 {
+                log::debug!("Privacy 2: host cursor already hidden");
+                return Ok(None);
+            }
+            let library = Library::load_with_flags("Magnification.dll", LOAD_LIBRARY_SEARCH_SYSTEM32)?;
+            let initialize = *library.get::<unsafe extern "system" fn() -> BOOL>(b"MagInitialize")?;
+            let uninitialize = *library.get::<unsafe extern "system" fn() -> BOOL>(b"MagUninitialize")?;
+            let show = *library.get::<unsafe extern "system" fn(BOOL) -> BOOL>(b"MagShowSystemCursor")?;
+            if initialize() == FALSE {
+                bail!("Privacy 2: MagInitialize failed");
+            }
+            if show(FALSE) == FALSE {
+                uninitialize();
+                bail!("Privacy 2: MagShowSystemCursor(FALSE) failed");
+            }
+            log::info!("Privacy 2: host cursor hidden, using viewer cursor");
+            Ok(Some(Self { show, uninitialize, _library: library }))
+        }
+    }
+}
+
+impl Drop for HiddenHostCursor {
+    fn drop(&mut self) {
+        unsafe {
+            if (self.show)(TRUE) == FALSE {
+                log::error!("Privacy 2: failed to restore the host cursor");
+            } else {
+                log::info!("Privacy 2: host cursor restored");
+            }
+            if (self.uninitialize)() == FALSE {
+                log::warn!("Privacy 2: MagUninitialize failed");
+            }
+        }
+    }
+}
 
 struct Display {
     dm: DEVMODEW,
@@ -509,7 +565,15 @@ impl PrivacyMode for PrivacyModeImpl {
         guard.conn_id = conn_id;
         guard.succeeded = true;
 
-        allow_err!(super::win_input::hook());
+        allow_err!(super::win_input::hook_with(|| {
+            if virtual_display_manager::is_amyuni_idd() && scrap::codec::enable_directx_capture() {
+                match HiddenHostCursor::acquire() {
+                    Ok(cursor) => return cursor,
+                    Err(err) => log::warn!("Privacy 2 cursor setup failed: {err}"),
+                }
+            }
+            None
+        }));
 
         Ok(true)
     }

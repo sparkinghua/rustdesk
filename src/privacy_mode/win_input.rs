@@ -98,6 +98,10 @@ fn do_hook(tx: Sender<String>) -> ResultType<(HHOOK, HHOOK)> {
 }
 
 pub fn hook() -> ResultType<()> {
+    hook_with(|| ())
+}
+
+pub(super) fn hook_with<T>(on_start: impl FnOnce() -> T + Send + 'static) -> ResultType<()> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let hook_keyboard;
@@ -118,6 +122,7 @@ pub fn hook() -> ResultType<()> {
                 return;
             }
 
+            let session_guard = on_start();
             let mut msg = MSG {
                 hwnd: NULL as _,
                 message: 0 as _,
@@ -154,6 +159,7 @@ pub fn hook() -> ResultType<()> {
                 );
             }
 
+            drop(session_guard);
             *CUR_HOOK_THREAD_ID.lock().unwrap() = 0;
         }
     });
